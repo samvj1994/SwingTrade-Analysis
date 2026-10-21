@@ -63,7 +63,7 @@ def read_symbols(path: Path) -> list[tuple[str, str]]:
 
 
 def download_symbol(symbol: str, start_date: str, end_date: str | None, suffix: str) -> pd.DataFrame:
-    """Return daily OHLCV data for one Indian stock in the supplied date range."""
+    """Return daily OHLCV data for one symbol in the supplied date range."""
     yahoo_symbol = symbol if symbol.endswith(suffix) else f"{symbol}{suffix}"
     # yfinance's end date is exclusive; use tomorrow when no end date is supplied.
     effective_end = end_date or (
@@ -91,7 +91,7 @@ def download_symbol(symbol: str, start_date: str, end_date: str | None, suffix: 
     return data.loc[:, [column for column in preferred_columns if column in data.columns]]
 
 
-def main(start_date: str, end_date: str | None, symbols_file: Path, output_dir: Path, suffix: str) -> None:
+def main(start_date: str, end_date: str | None, symbols_file: Path, output_dir: Path, suffix: str) -> int:
     YFINANCE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     yf.set_tz_cache_location(str(YFINANCE_CACHE_DIR))
     symbols = read_symbols(symbols_file)
@@ -113,6 +113,7 @@ def main(start_date: str, end_date: str | None, symbols_file: Path, output_dir: 
         logging.warning("No file was created for: %s", ", ".join(failures))
     else:
         logging.info("Completed successfully. Files saved to %s", output_dir)
+    return int(bool(failures))
 
 
 if __name__ == "__main__":
@@ -122,6 +123,6 @@ if __name__ == "__main__":
     parser.add_argument("--end", default=None, help="End date, exclusive (YYYY-MM-DD)")
     parser.add_argument("--symbols-file", type=Path, default=SYMBOLS_FILE)
     parser.add_argument("--output-dir", type=Path, default=DATA_DIR)
-    parser.add_argument("--suffix", choices=[".NS", ".BO"], default=".NS")
+    parser.add_argument("--suffix", choices=[".NS", ".BO", ""], default=".NS")
     args = parser.parse_args()
-    main(args.start, args.end, args.symbols_file, args.output_dir, args.suffix)
+    raise SystemExit(main(args.start, args.end, args.symbols_file, args.output_dir, args.suffix))

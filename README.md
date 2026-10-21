@@ -1,4 +1,4 @@
-# NIFTY 50 breakout strategy
+# SwingTrade Analysis
 
 ## Run locally on macOS
 
@@ -6,7 +6,7 @@ Install Python 3.11 or 3.12. In Terminal, go to the project folder and create
 an isolated environment:
 
 ```bash
-cd /path/to/Algo-Nifty-50
+cd /path/to/SwingTrade-Analysis
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -17,18 +17,26 @@ streamlit run dashboard.py
 Open `http://localhost:8501` in your browser. Stop the dashboard with
 Control-C in Terminal.
 
-On first run, use the sidebar date range and click **Refresh all NIFTY 50 data**
-and/or **Refresh all SENSEX data** to download price history. NSE/NIFTY 50 files
-are stored in `data/`; BSE/SENSEX files are stored in `data/BSE/`. These
+The dashboard uses a dark financial-workstation theme configured in
+`.streamlit/config.toml`.
+
+On first run, use the sidebar date range and refresh NIFTY 50, SENSEX, and
+Nasdaq-100 to download price history. NSE/NIFTY 50 files are stored in `data/`,
+BSE/SENSEX files in `data/BSE/`, and Nasdaq-100 files in `data/NASDAQ/`. Nasdaq
+prices are in USD; India-market prices are in INR. These
 downloaded files are local and excluded from Git, so download them on each
-computer. A 2024 start date is recommended when backtesting from 2025 because
-the rules need 252 trading days for the 52-week range and 220 sessions for the
-EMA.
+computer. The signal scan needs sufficient warm-up history for its 52-week
+range and 220-session EMA.
+
+The Nasdaq-100 ticker universe is in `nasdaq100_symbols.csv`. It follows
+Nasdaq's published constituent list and is adjusted for Nasdaq's announced
+2026 additions and replacements. Constituent membership can change separately
+from the daily price refresh, so update this file after future index changes.
 
 ## Groww API credentials
 
-Groww is optional; screening and backtesting work without it. To enable the
-Groww portfolio tab, copy the example file and edit it locally:
+Groww is optional; market screening works without it. To enable the Groww
+portfolio and trading-journal tabs, copy the example file and edit it locally:
 
 ```bash
 cp .env.example .env
@@ -52,6 +60,17 @@ valuation date for every section included in combined results. The CSV columns
 are `date`, `asset_class`, `cash_flow`, and `market_value`; purchases are
 negative and sale/redemption proceeds are positive.
 
+## Trading journal
+
+Open **Trading journal** and choose **Sync executed trades from Groww** after
+placing trades. Captured fills are stored locally in `data/trade_journal.sqlite3`
+and deduplicated on later syncs. The journal reports closed-cycle gross/net P&L,
+win rate, profit factor, expectancy, drawdown, average hold, plan adherence,
+review completion, and cumulative XIRR since the first captured fill. Review
+fields can be edited in the closed-cycle table and saved. XIRR uses the cash
+flows in the captured fills and marks open positions when a current Groww price
+is available; it cannot include trades from before they were first synced.
+
 ## Strategy implemented
 
 At each close, a stock must satisfy all filters: SMA 150 > EMA 220, close > SMA
@@ -60,10 +79,8 @@ fallen below the EMA 220 at least once in the preceding 90 sessions. An entry
 signal additionally requires a close above the previous 252-session closing
 high. Buy orders execute at the next session open.
 
-Positions are exited at the next session open after the close is below the EMA
-220 or 8% below the entry price. The portfolio starts with $100,000 and limits
-each position to $10,000 by default. Both values can be adjusted in the
-dashboard. Fees/slippage may be supplied as a per-side percentage.
+The dashboard applies the same signal rules to NIFTY 50, SENSEX, and Nasdaq-100 constituents. It no longer
+simulates a portfolio; actual Groww fills are tracked in the trading journal.
 
 ## Push to GitHub
 
@@ -80,8 +97,8 @@ git init -b main
 git remote add origin https://github.com/USERNAME/REPOSITORY.git
 git status --short
 git add .gitignore README.md requirements.txt dashboard.py strategy.py \
-  download_nifty50_data.py groww_connection.py groww_portfolio.py \
-  nifty50_symbols.csv sensex_symbols.csv .env.example
+  download_nifty50_data.py groww_connection.py groww_portfolio.py trade_journal.py \
+  nifty50_symbols.csv sensex_symbols.csv nasdaq100_symbols.csv .env.example
 git status --short
 git commit -m "Prepare dashboard for cross-platform local use"
 git push -u origin main

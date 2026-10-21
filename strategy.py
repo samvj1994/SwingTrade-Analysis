@@ -65,16 +65,25 @@ def prepare_data(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_market_data(data_dir: str | Path) -> dict[str, pd.DataFrame]:
-    """Load and prepare NSE/NIFTY and BSE/SENSEX CSVs from ``data_dir``."""
+    """Load and prepare NSE/NIFTY, BSE/SENSEX, and NASDAQ-100 CSVs."""
     root = Path(data_dir)
-    files = sorted(root.glob("*.csv")) + sorted((root / "BSE").glob("*.csv"))
+    files = (
+        sorted(root.glob("*.csv"))
+        + sorted((root / "BSE").glob("*.csv"))
+        + sorted((root / "NASDAQ").glob("*.csv"))
+    )
     if not files:
         raise FileNotFoundError(f"No CSV files found in {root.resolve()}")
 
     market_data = {}
     for file in files:
-        exchange = "BSE" if file.parent.name.upper() == "BSE" else "NSE"
-        index_name = "SENSEX" if exchange == "BSE" else "NIFTY 50"
+        market = file.parent.name.upper()
+        if market == "BSE":
+            exchange, index_name = "BSE", "SENSEX"
+        elif market == "NASDAQ":
+            exchange, index_name = "NASDAQ", "Nasdaq-100"
+        else:
+            exchange, index_name = "NSE", "NIFTY 50"
         key = f"{exchange}/{index_name}/{file.stem}"
         market_data[key] = prepare_data(pd.read_csv(file))
     return market_data
