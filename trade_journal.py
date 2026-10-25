@@ -190,10 +190,12 @@ def merge_reviews(db_path: str | Path, cycles: pd.DataFrame) -> pd.DataFrame:
     if not path.exists():
         return cycles
     with sqlite3.connect(path) as connection:
-        try:
-            reviews = pd.read_sql_query("SELECT * FROM reviews", connection)
-        except sqlite3.OperationalError:
+        table_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'reviews'"
+        ).fetchone()
+        if table_exists is None:
             return cycles
+        reviews = pd.read_sql_query("SELECT * FROM reviews", connection)
     if reviews.empty:
         return cycles
     reviews = reviews.rename(columns={"cycle_id": "Cycle ID", "plan_adherence": "Plan adherence", "notes": "Notes", "reviewed": "Reviewed"})

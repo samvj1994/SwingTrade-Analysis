@@ -22,7 +22,7 @@ from groww_portfolio import (
     stock_holding_rows,
     stock_quote_symbols,
 )
-from strategy import load_market_data
+from strategy import BacktestConfig, load_market_data
 from trade_journal import closed_cycles, journal_metrics, load_fills, merge_reviews, open_positions, save_reviews, save_trades
 
 
@@ -129,6 +129,7 @@ except FileNotFoundError:
     st.stop()
 
 latest_rows = []
+stop_loss_pct = BacktestConfig().stop_loss_pct
 criteria_labels = {
     "Trend_Above_EMA": "150 SMA > 220 EMA",
     "Close_Above_SMA_50": "Close > 50 SMA",
@@ -156,6 +157,8 @@ for symbol, data in market_data.items():
         "Readiness": "Ready to trade" if bool(latest["Entry_Signal"]) else ("Watch closely" if int(latest["Criteria_Met"]) >= 4 else "Needs more confirmation"),
         "Signal date": indian_date(latest["Date"]),
         "Close": latest["Close"],
+        "Reference entry": latest["Close"],
+        "Stop reference": latest["Close"] * (1 - stop_loss_pct),
         "Currency": "USD" if exchange == "NASDAQ" else "INR",
         "SMA 50": latest["SMA_50"],
         "SMA 150": latest["SMA_150"],
@@ -201,6 +204,49 @@ with tab_screen:
         incomplete = ranked[ranked["Data bars"] < 309]
         if not incomplete.empty:
             st.warning(f"{len(incomplete)} stock(s) have fewer than 309 trading bars and cannot fully evaluate the 220-session EMA and 90-session pullback conditions yet.")
+
+        st.subheader("Active entry signals")
+        if qualified.empty:
+            st.info("No stocks currently meet all six entry conditions.")
+        else:
+            signal_details = qualified[
+                [
+                    "Exchange",
+                    "Index",
+                    "Symbol",
+                    "Signal date",
+                    "Reference entry",
+                    "Stop reference",
+                    "220 EMA exit",
+                    "Currency",
+                ]
+            ].rename(
+                columns={
+                    "Exchange": "Market",
+                    "Symbol": "Ticker",
+                    "Reference entry": "Signal-close reference",
+                    "Stop reference": f"Illustrative stop ({stop_loss_pct:.0%} below close)",
+                    "220 EMA exit": "220 EMA trigger at signal close",
+                }
+            )
+            st.dataframe(
+                signal_details.style.format(
+                    {
+                        "Signal-close reference": "{:,.2f}",
+                        f"Illustrative stop ({stop_loss_pct:.0%} below close)": "{:,.2f}",
+                        "220 EMA trigger at signal close": "{:,.2f}",
+                    }
+                ),
+                hide_index=True,
+                width="stretch",
+                alt="Qualified swing-trading signals with reference entry and exit levels",
+            )
+            st.caption(
+                f"Signals are confirmed at the daily close. The signal-close price is a reference, not a guaranteed entry; "
+                f"the backtest enters at the next session's open. The illustrative stop shown is {stop_loss_pct:.0%} below that close; "
+                "recalculate it from the actual entry fill. The 220 EMA is a moving exit trigger: a close below it queues a sell for "
+                "the next session's open. The actual exit fill is not known in advance, and there is no fixed profit target."
+            )
 
         chart_columns = st.columns(2)
         with chart_columns[0]:
