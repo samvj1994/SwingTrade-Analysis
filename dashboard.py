@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import sys
 from datetime import date
@@ -14,16 +15,16 @@ import streamlit as st
 from groww_connection import get_groww_client
 from groww_portfolio import (
     complete_total,
+    current_stock_position_rows,
     extract_ltp_prices,
     load_historical_stock_prices,
-    position_pnl,
-    position_value_total,
-    statement_performance,
-    stock_holding_rows,
     stock_quote_symbols,
 )
 from strategy import BacktestConfig, load_market_data
-from trade_journal import closed_cycles, journal_metrics, load_fills, merge_reviews, open_positions, save_reviews, save_trades
+from trade_journal import (
+    load_portfolio_inclusions,
+    save_portfolio_inclusions,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -48,22 +49,39 @@ def response_records(response: object, key: str) -> list[dict[str, object]]:
     return [record for record in records if isinstance(record, dict)]
 
 
-def show_groww_table(records: list[dict[str, object]], date_columns: list[str] | None = None) -> None:
-    """Render Groww records while formatting dates consistently."""
-    if not records:
-        st.info("No records returned.")
-        return
-    frame = pd.DataFrame(records)
-    if date_columns:
-        for column in date_columns:
-            if column in frame.columns:
-                frame[column] = pd.to_datetime(frame[column], errors="coerce").dt.strftime("%d-%m-%Y %H:%M")
-    st.dataframe(frame, use_container_width=True, hide_index=True)
+def fetch_current_stock_positions() -> dict[str, object]:
+    """Fetch current stock holdings and available prices, without order history."""
+    groww = get_groww_client()
+    holdings = response_records(groww.get_holdings_for_user(timeout=10), "holdings")
+    quote_symbols = stock_quote_symbols(holdings)
+    ltp_prices: dict[str, float] = {}
+    quote_error = None
+    if quote_symbols:
+        try:
+            quote_response = groww.get_ltp(
+                exchange_trading_symbols=tuple(sorted(quote_symbols)),
+                segment="CASH",
+                timeout=10,
+            )
+            ltp_prices = extract_ltp_prices(quote_response, quote_symbols)
+            if len(ltp_prices) < len(quote_symbols):
+                quote_error = (
+                    f"Groww returned prices for {len(ltp_prices)} of "
+                    f"{len(quote_symbols)} Indian stock holdings."
+                )
+        except Exception as error:
+            quote_error = str(error)
+    return {
+        "holdings": holdings,
+        "ltp_prices": ltp_prices,
+        "historical_prices": load_historical_stock_prices(DATA_DIR, holdings),
+        "quote_error": quote_error,
+    }
 
 
 st.set_page_config(page_title="Swing Trading Dashboard", layout="wide")
 st.title("Swing trader workspace")
-st.caption("Daily swing setups across NSE, BSE, and Nasdaq-100 · Rule-based signals, trade review, and portfolio monitoring.")
+st.caption("Daily swing setups across NSE, BSE, and Nasdaq-100 · Rule-based signals, position selection, and portfolio monitoring.")
 
 with st.sidebar:
     st.header("Market universe")
@@ -444,387 +462,167 @@ with tab_screen:
                 alt="Stocks near qualification, with individual strategy checks",
             )
 
-with tab_groww:
-    st.subheader("Portfolio monitor")
-    st.caption("Read-only portfolio data from Groww. No orders are placed by this dashboard.")
-    if st.button("Refresh Groww portfolio", type="primary"):
+with tab_journal:
+    st.subheader("Current stock positions")
+    st.caption("Only current stock holdings are shown. F&O, orders, completed trades, and transaction history are excluded.")
+    journal_db = DATA_DIR / "trade_journal.sqlite3"
+    if st.button("Fetch current positions from Groww", type="primary", key="journal_fetch_positions"):
         try:
-            with st.spinner("Connecting to Groww..."):
-                groww = get_groww_client()
-                holdings_response = groww.get_holdings_for_user(timeout=10)
-                cash_positions_response = groww.get_positions_for_user(segment="CASH", timeout=10)
-                fno_positions_response = groww.get_positions_for_user(segment="FNO", timeout=10)
-                orders_response = groww.get_order_list(page=0, page_size=25)
-                orders = response_records(orders_response, "order_list")
-                trades = []
-                for order in orders:
-                    order_id = order.get("groww_order_id")
-                    if not order_id:
-                        continue
-                    trade_response = groww.get_trade_list_for_order(
-                        groww_order_id=order_id,
-                        segment=order.get("segment", "CASH"),
-                        page=0,
-                        page_size=50,
-                        timeout=10,
-                    )
-                    order_trades = response_records(trade_response, "trade_list")
-                    for trade in order_trades:
-                        trade.setdefault("segment", order.get("segment", "CASH"))
-                        trade.setdefault("groww_order_id", order_id)
-                        trade.setdefault("trading_symbol", order.get("trading_symbol") or order.get("trading_symbol_name") or order.get("symbol"))
-                    trades.extend(order_trades)
-                synced_count, skipped_count = save_trades(DATA_DIR / "trade_journal.sqlite3", trades)
-                holdings = response_records(holdings_response, "holdings")
-                cash_positions = response_records(cash_positions_response, "positions")
-                fno_positions = response_records(fno_positions_response, "positions")
-                quote_symbols = stock_quote_symbols(holdings)
-                ltp_prices: dict[str, float] = {}
-                quote_error = None
-                if quote_symbols:
-                    try:
-                        quote_response = groww.get_ltp(
-                            exchange_trading_symbols=tuple(sorted(quote_symbols)),
-                            segment="CASH",
-                            timeout=10,
-                        )
-                        ltp_prices = extract_ltp_prices(quote_response, quote_symbols)
-                        if len(ltp_prices) < len(quote_symbols):
-                            quote_error = (
-                                f"Groww returned quotes for {len(ltp_prices)} of "
-                                f"{len(quote_symbols)} held stock symbols."
-                            )
-                    except Exception as error:
-                        quote_error = str(error)
-                historical_prices = load_historical_stock_prices(DATA_DIR, holdings)
-                st.session_state["groww_portfolio_snapshot"] = {
-                    "holdings": holdings,
-                    "cash_positions": cash_positions,
-                    "fno_positions": fno_positions,
-                    "orders": orders,
-                    "trades": trades,
-                    "ltp_prices": ltp_prices,
-                    "historical_prices": historical_prices,
-                    "quote_error": quote_error,
-                    "synced_count": synced_count,
-                    "skipped_count": skipped_count,
-                }
-            st.success(f"Groww refreshed. {synced_count} new executed trade fill(s) added to the journal.")
+            with st.spinner("Fetching current stock holdings..."):
+                st.session_state["current_stock_positions_snapshot"] = (
+                    fetch_current_stock_positions()
+                )
+            st.session_state["current_positions_message"] = (
+                "Current stock positions fetched from Groww."
+            )
+            st.rerun()
         except Exception as error:
-            st.error(f"Groww connection failed: {error}")
-            st.info("Check .env, Groww API subscription, daily API-key approval, and network access.")
+            st.error(f"Could not fetch current Groww stock positions: {error}")
 
-    snapshot = st.session_state.get("groww_portfolio_snapshot")
-    if snapshot:
-        holdings = snapshot["holdings"]
-        cash_positions = snapshot["cash_positions"]
-        fno_positions = snapshot["fno_positions"]
-        stock_rows = stock_holding_rows(
-            holdings,
+    message = st.session_state.pop("current_positions_message", None)
+    if message:
+        st.success(message)
+    snapshot = st.session_state.get("current_stock_positions_snapshot")
+    if not snapshot:
+        st.info("Fetch current positions from Groww to see your stock holdings.")
+    else:
+        position_rows = current_stock_position_rows(
+            snapshot["holdings"],
             snapshot["ltp_prices"],
             snapshot["historical_prices"],
         )
-        invested = complete_total(stock_rows, "Invested value")
-        current_value = complete_total(stock_rows, "Current value")
-        stock_pnl = complete_total(stock_rows, "Unrealized P&L")
-        historical_count = sum(row["Price source"] == "Historical close" for row in stock_rows)
-        unavailable_count = sum(row["Price source"] == "Unavailable" for row in stock_rows)
-        fno_pnl = position_pnl(fno_positions)
-        cash_pnl = position_pnl(cash_positions)
-        fno_realized_pnl = position_value_total(
-            fno_positions,
-            ("realized_pnl", "realised_pnl"),
-        )
-
-        st.subheader("Portfolio overview")
-        overview = st.columns(4)
-        overview[0].metric(
-            "Stocks · cost basis",
-            f"₹{invested:,.2f}" if invested is not None else "Unavailable",
-        )
-        overview[1].metric(
-            "Stocks · value at available prices",
-            f"₹{current_value:,.2f}" if current_value is not None else "Unavailable",
-        )
-        overview[2].metric(
-            "Stocks · P&L vs. average cost",
-            f"₹{stock_pnl:,.2f}" if stock_pnl is not None else "Unavailable",
-        )
-        overview[3].metric(
-            "F&O · open position P&L",
-            f"₹{fno_pnl:,.2f}" if fno_pnl is not None else "Unavailable",
-        )
-
-        st.subheader("Stocks · delivery holdings")
-        if stock_rows:
-            stock_frame = pd.DataFrame(stock_rows)
-            st.dataframe(stock_frame, use_container_width=True, hide_index=True)
-            if historical_count:
-                st.caption(
-                    f"{historical_count} holding(s) use the latest downloaded daily close "
-                    "because a live Groww quote was unavailable. The price date is shown per row; "
-                    "these values are historical, not live."
+        if not position_rows:
+            st.info("Groww returned no current NSE/BSE or identifiable US stock holdings.")
+        else:
+            inclusions = load_portfolio_inclusions(journal_db)
+            editor_frame = pd.DataFrame(
+                [
+                    {
+                        "Market": row["Market"],
+                        "Symbol": row["Symbol"],
+                        "Currency": row["Currency"],
+                        "Quantity": row["Quantity"],
+                        "Average cost": row["Average cost"],
+                        "Current price": row["Current price"],
+                        "Include in portfolio": inclusions.get(
+                            str(row["Position key"]), False
+                        ),
+                    }
+                    for row in position_rows
+                ]
+            )
+            editor_key = hashlib.sha256(
+                "|".join(str(row["Position key"]) for row in position_rows).encode()
+            ).hexdigest()[:12]
+            edited_positions = st.data_editor(
+                editor_frame,
+                key=f"current_positions_{editor_key}",
+                hide_index=True,
+                width="stretch",
+                disabled=[
+                    "Market",
+                    "Symbol",
+                    "Currency",
+                    "Quantity",
+                    "Average cost",
+                    "Current price",
+                ],
+                column_config={
+                    "Quantity": st.column_config.NumberColumn(format="%.4f"),
+                    "Average cost": st.column_config.NumberColumn(format="%.2f"),
+                    "Current price": st.column_config.NumberColumn(format="%.2f"),
+                    "Include in portfolio": st.column_config.CheckboxColumn(
+                        "Include in portfolio"
+                    ),
+                },
+                alt="Current stock positions with portfolio inclusion checkboxes",
+            )
+            updated_inclusions = {
+                str(row["Position key"]): bool(included)
+                for row, included in zip(
+                    position_rows,
+                    edited_positions["Include in portfolio"],
                 )
-            if unavailable_count:
-                st.warning(
-                    f"No live quote or downloaded close was available for {unavailable_count} "
-                    "holding(s); those are excluded from the value and P&L totals."
+            }
+            saved_inclusions = {
+                str(row["Position key"]): inclusions.get(
+                    str(row["Position key"]), False
                 )
-        else:
-            st.info("Groww returned no stock holdings.")
-        if snapshot["quote_error"]:
-            st.warning(
-                "Groww live quotes were incomplete: "
-                f"{snapshot['quote_error']} Downloaded daily closes are used for those stocks "
-                "when available."
-            )
-
-        st.subheader("Stocks · open cash positions")
-        if cash_positions:
-            st.metric(
-                "Open cash-position P&L (Groww)",
-                f"₹{cash_pnl:,.2f}" if cash_pnl is not None else "Unavailable",
-            )
-        if cash_positions:
-            show_groww_table(cash_positions)
-        else:
-            st.info("No open cash-segment positions were returned.")
-
-        st.subheader("F&O · open positions")
-        if fno_positions:
-            st.caption(
-                "F&O positions are fetched separately from cash holdings. The P&L metric "
-                "uses Groww's position P&L field only when every returned position provides it."
-            )
-            fno_columns = st.columns(2)
-            fno_columns[0].metric(
-                "Open F&O position P&L (Groww)",
-                f"₹{fno_pnl:,.2f}" if fno_pnl is not None else "Unavailable",
-            )
-            fno_columns[1].metric(
-                "F&O realized P&L on returned positions",
-                f"₹{fno_realized_pnl:,.2f}" if fno_realized_pnl is not None else "Unavailable",
-            )
-            show_groww_table(fno_positions)
-        else:
-            st.info("No open F&O positions were returned.")
-
-        st.subheader("Mutual funds")
-        st.info(
-            "Mutual-fund holdings are not exposed by the installed Groww Trade API client. "
-            "They are not included in the stock/F&O totals."
-        )
-
-        st.subheader("Portfolio XIRR and realized P&L")
-        st.metric("Portfolio XIRR", "Unavailable")
-        st.caption(
-            "A reliable XIRR needs the complete dated portfolio cash-flow ledger "
-            "(including deposits and withdrawals) and the complete closing portfolio value. "
-            "The Groww Trade API data available here does not provide the full ledger or mutual-fund value."
-        )
-        st.metric("Lifetime realized P&L", "Unavailable")
-        st.caption(
-            "Recent order/trade pages are not a complete lifetime transaction history, "
-            "so they are not summed as realized portfolio P&L."
-        )
-        with st.expander("Recent orders and executed trades"):
-            st.caption("Recent API records only; these are not used for lifetime P&L or XIRR.")
-            st.subheader("Orders")
-            show_groww_table(snapshot["orders"], ["created_at", "exchange_time", "trade_date"])
-            st.subheader("Executed trades")
-            show_groww_table(snapshot["trades"], ["created_at", "trade_date_time"])
-
-        st.subheader("Statement-based XIRR and P&L")
-        st.caption(
-            "Groww's Trade API does not return a complete transaction history or mutual-fund values. "
-            "Upload a normalized CSV to calculate statement-based returns; files are processed in this session only."
-        )
-        template = "date,asset_class,cash_flow,market_value\n"
-        st.download_button(
-            "Download normalized CSV template",
-            data=template,
-            file_name="groww_portfolio_template.csv",
-            mime="text/csv",
-        )
-        st.caption(
-            "Use columns date, asset_class, cash_flow, market_value. Purchases are negative cash flows; "
-            "sale/redemption proceeds are positive. Put current closing values in market_value on the "
-            "valuation date. Allowed sections: Stocks, F&O, Mutual Funds. For an accurate combined XIRR, "
-            "include the complete transaction history and value every included section on the same date."
-        )
-        st.code(
-            "date,asset_class,cash_flow,market_value\n"
-            "2025-01-15,Stocks,-10000,\n"
-            f"{date.today().isoformat()},Stocks,,11500\n"
-            "2025-02-01,Mutual Funds,-5000,\n"
-            f"{date.today().isoformat()},Mutual Funds,,5600",
-            language="csv",
-        )
-        statement_file = st.file_uploader(
-            "Upload normalized portfolio CSV",
-            type=["csv"],
-            key="groww_statement_csv",
-        )
-        if statement_file is not None:
-            try:
-                statement_sections, statement_total = statement_performance(
-                    pd.read_csv(statement_file)
-                )
-            except (ValueError, pd.errors.ParserError, UnicodeDecodeError) as error:
-                st.error(f"Could not calculate statement returns: {error}")
-            else:
-                st.dataframe(
-                    statement_sections.style.format({
-                        "Invested (buy flows)": "₹{:,.2f}",
-                        "Sale / redemption proceeds": "₹{:,.2f}",
-                        "Closing value": "₹{:,.2f}",
-                        "Total P&L": "₹{:,.2f}",
-                        "XIRR %": "{:.2f}%",
-                    }),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-                if statement_total["valuation_date"] is None:
-                    st.warning(
-                        "Section returns are shown above. A combined portfolio XIRR/P&L needs "
-                        "the same closing valuation date for every included section."
-                    )
-                else:
-                    total_columns = st.columns(3)
-                    total_columns[0].metric(
-                        "Combined statement P&L",
-                        f"₹{statement_total['pnl']:,.2f}",
-                    )
-                    total_columns[1].metric(
-                        "Combined closing value",
-                        f"₹{statement_total['closing_value']:,.2f}",
-                    )
-                    total_columns[2].metric(
-                        "Combined XIRR",
-                        f"{statement_total['xirr_pct']:.2f}%"
-                        if statement_total["xirr_pct"] is not None
-                        else "Unavailable",
-                    )
-                    st.caption(
-                        f"Statement valuation date: {indian_date(statement_total['valuation_date'])}. "
-                        "XIRR is shown only when the supplied cash flows have a unique solution."
-                    )
-
-with tab_journal:
-    st.subheader("Trade journal")
-    st.caption("Actual executed Groww fills are saved locally in this repository. Sync after a trade to capture it; this dashboard never places orders.")
-    if st.button("Sync executed trades from Groww", type="primary", key="journal_sync"):
-        st.session_state["journal_sync_requested"] = True
-        st.rerun()
-    if st.session_state.pop("journal_sync_requested", False):
-        try:
-            groww = get_groww_client()
-            all_orders = []
-            for page in range(10):
-                page_orders = response_records(groww.get_order_list(page=page, page_size=100), "order_list")
-                if not page_orders:
-                    break
-                all_orders.extend(page_orders)
-                if len(page_orders) < 100:
-                    break
-            fills = []
-            for order in all_orders:
-                order_id = order.get("groww_order_id")
-                if not order_id:
-                    continue
-                order_trades = response_records(groww.get_trade_list_for_order(
-                    groww_order_id=order_id, segment=order.get("segment", "CASH"),
-                    page=0, page_size=100, timeout=10), "trade_list")
-                for trade in order_trades:
-                    trade.setdefault("segment", order.get("segment", "CASH"))
-                    trade.setdefault("groww_order_id", order_id)
-                    trade.setdefault("trading_symbol", order.get("trading_symbol") or order.get("symbol"))
-                fills.extend(order_trades)
-            inserted, skipped = save_trades(DATA_DIR / "trade_journal.sqlite3", fills)
-            st.success(f"Sync complete: {inserted} new fill(s) saved; {skipped} record(s) lacked usable fill details.")
-        except Exception as error:
-            st.error(f"Could not sync Groww trades: {error}")
-    journal_db = DATA_DIR / "trade_journal.sqlite3"
-    all_fills = load_fills(journal_db)
-    cycles = merge_reviews(journal_db, closed_cycles(all_fills))
-    if all_fills.empty:
-        st.info("No executed trades are saved yet. Use **Sync executed trades from Groww** after placing a trade. Historical fills available from Groww will also be imported.")
-    else:
-        period = st.radio("Analysis period", ["Day", "Month", "Year", "All time"], index=2, horizontal=True, key="journal_period")
-        if period == "Year":
-            available = sorted(all_fills["trade_at"].dt.year.dropna().unique().tolist(), reverse=True)
-            chosen = st.selectbox("Year", available, index=0, key="journal_year")
-            start = pd.Timestamp(int(chosen), 1, 1)
-            end = pd.Timestamp(int(chosen) + 1, 1, 1)
-        elif period == "Month":
-            months = sorted(all_fills["trade_at"].dt.to_period("M").dropna().unique(), reverse=True)
-            chosen = st.selectbox("Month", months, index=0, key="journal_month")
-            start, end = chosen.start_time, chosen.end_time + pd.Timedelta(days=1)
-        elif period == "Day":
-            days = sorted(all_fills["trade_at"].dt.date.dropna().unique(), reverse=True)
-            chosen = st.selectbox("Day", days, index=0, key="journal_day")
-            start, end = pd.Timestamp(chosen), pd.Timestamp(chosen) + pd.Timedelta(days=1)
-        else:
-            start, end = all_fills["trade_at"].min(), all_fills["trade_at"].max() + pd.Timedelta(days=1)
-        period_fills = all_fills[(all_fills["trade_at"] >= start) & (all_fills["trade_at"] < end)]
-        period_cycles = cycles[(cycles["Exit"] >= start) & (cycles["Exit"] < end)] if not cycles.empty else cycles
-        journal_prices = {}
-        snapshot = st.session_state.get("groww_portfolio_snapshot")
-        if snapshot:
-            for row in stock_holding_rows(snapshot["holdings"], snapshot["ltp_prices"], snapshot["historical_prices"]):
-                if row["Price"] is not None:
-                    journal_prices[str(row["Symbol"]).upper()] = float(row["Price"])
-            for position in snapshot["cash_positions"] + snapshot["fno_positions"]:
-                symbol = str(position.get("trading_symbol") or position.get("symbol") or "").upper()
-                price = pd.to_numeric(position.get("ltp") or position.get("last_price") or position.get("market_price"), errors="coerce")
-                if symbol and pd.notna(price) and float(price) > 0:
-                    journal_prices[symbol] = float(price)
-        metrics = journal_metrics(all_fills, journal_prices)
-        closed_count = len(period_cycles)
-        gross = float(period_cycles["Gross P&L"].sum()) if closed_count else 0.0
-        net = float(period_cycles["Net P&L"].sum()) if closed_count else 0.0
-        wins = period_cycles[period_cycles["Net P&L"] > 0] if closed_count else period_cycles
-        losses = period_cycles[period_cycles["Net P&L"] < 0] if closed_count else period_cycles
-        loss_amount = abs(float(losses["Net P&L"].sum())) if not losses.empty else 0.0
-        equity = period_cycles["Net P&L"].cumsum() if closed_count else pd.Series(dtype=float)
-        dd = equity - equity.cummax() if not equity.empty else pd.Series(dtype=float)
-        reviewed_count = int(period_cycles["Reviewed"].sum()) if closed_count else 0
-        adherence = period_cycles["Plan adherence"].dropna() if closed_count else pd.Series(dtype=float)
-        xirr_value = metrics["xirr"]
-        st.caption(f"Selected period: **{period}** · XIRR is cumulative since the first captured fill.")
-        first_row = st.columns(6)
-        first_row[0].metric("Closed cycles", f"{closed_count:,}")
-        first_row[1].metric("Gross P&L", f"₹{gross:,.2f}")
-        first_row[2].metric("Net after recorded costs", f"₹{net:,.2f}")
-        first_row[3].metric("Win rate", f"{len(wins) / closed_count:.1%}" if closed_count else "—")
-        first_row[4].metric("Profit factor", f"{float(wins['Net P&L'].sum()) / loss_amount:.2f}" if loss_amount else "—")
-        first_row[5].metric("Plan adherence", f"{adherence.mean():.0%}" if not adherence.empty else "—")
-        second_row = st.columns(4)
-        second_row[0].metric("XIRR · since tracking began", f"{xirr_value:.2%}" if xirr_value is not None else "—")
-        second_row[1].metric("Expectancy / trade", f"₹{net / closed_count:,.2f}" if closed_count else "—")
-        second_row[2].metric("Max drawdown", f"₹{abs(float(dd.min())):,.2f}" if not dd.empty else "₹0.00")
-        hold = float(period_cycles["Hold minutes"].mean()) if closed_count else None
-        second_row[3].metric("Average hold", f"{hold / 60:.1f} hr" if hold is not None else "—")
-        st.metric("Reviews completed", f"{reviewed_count}/{closed_count}")
-        st.caption(f"{len(period_fills):,} executed fill(s) in the selected period · {len(all_fills):,} captured in the journal. Costs are included only when Groww provides them in the fill record; open positions are marked using the latest available Groww price when present.")
-        st.subheader("Open trades")
-        open_frame = open_positions(all_fills, journal_prices)
-        if open_frame.empty:
-            st.info("No open long positions in the captured fills.")
-        else:
-            st.dataframe(open_frame, use_container_width=True, hide_index=True)
-        st.subheader("Closed trade cycles")
-        if not period_cycles.empty:
-            editable_cols = ["Cycle ID", "Symbol", "Segment", "Entry", "Exit", "Quantity", "Gross P&L", "Fees", "Net P&L", "Hold minutes", "Plan adherence", "Reviewed", "Notes"]
-            edited = st.data_editor(period_cycles[editable_cols], use_container_width=True, hide_index=True,
-                disabled=["Cycle ID", "Symbol", "Segment", "Entry", "Exit", "Quantity", "Gross P&L", "Fees", "Net P&L", "Hold minutes"],
-                column_config={"Cycle ID": None, "Plan adherence": st.column_config.CheckboxColumn("Plan followed?"), "Reviewed": st.column_config.CheckboxColumn("Review complete"), "Notes": st.column_config.TextColumn("Notes", max_chars=500)})
-            if st.button("Save trade reviews", key="save_journal_reviews"):
-                save_reviews(journal_db, edited)
-                st.success("Trade reviews saved.")
+                for row in position_rows
+            }
+            if updated_inclusions != saved_inclusions:
+                save_portfolio_inclusions(journal_db, updated_inclusions)
                 st.rerun()
+            st.caption("Checkbox changes save automatically and update Portfolio.")
+            if not any(row["Currency"] == "USD" for row in position_rows):
+                st.caption(
+                    "US stocks appear only when Groww returns them as current holdings "
+                    "with an identifiable US exchange or USD currency."
+                )
+            if snapshot.get("quote_error"):
+                st.warning(
+                    f"Groww live quotes were incomplete: {snapshot['quote_error']} "
+                    "Available prices from the holding data or downloaded daily closes are used."
+                )
+
+with tab_groww:
+    st.subheader("Selected stock portfolio")
+    st.caption("Only the current stock positions selected in Trade journal are included here.")
+    snapshot = st.session_state.get("current_stock_positions_snapshot")
+    if not snapshot:
+        st.info("Fetch current positions in Trade journal to build your selected portfolio.")
+    else:
+        inclusions = load_portfolio_inclusions(DATA_DIR / "trade_journal.sqlite3")
+        position_rows = current_stock_position_rows(
+            snapshot["holdings"],
+            snapshot["ltp_prices"],
+            snapshot["historical_prices"],
+        )
+        selected_rows = [
+            row for row in position_rows if inclusions.get(row["Position key"], False)
+        ]
+        if selected_rows:
+            positions_frame = pd.DataFrame(selected_rows)
+            st.dataframe(
+                positions_frame[
+                    [
+                        "Market",
+                        "Symbol",
+                        "Currency",
+                        "Quantity",
+                        "Average cost",
+                        "Invested value",
+                        "Current price",
+                        "Market value",
+                        "Unrealized P&L",
+                    ]
+                ].style.format(
+                    {
+                        "Quantity": "{:,.4f}",
+                        "Average cost": "{:,.2f}",
+                        "Invested value": "{:,.2f}",
+                        "Current price": "{:,.2f}",
+                        "Market value": "{:,.2f}",
+                        "Unrealized P&L": "{:,.2f}",
+                    },
+                    na_rep="—",
+                ),
+                hide_index=True,
+                width="stretch",
+                alt="Current stock positions selected for the portfolio",
+            )
+            for currency, currency_rows in positions_frame.groupby("Currency"):
+                symbol = "$" if currency == "USD" else "₹"
+                currency_columns = st.columns(3)
+                for column, field, label in zip(
+                    currency_columns,
+                    ("Invested value", "Market value", "Unrealized P&L"),
+                    ("Invested value", "Current value", "Unrealized P&L"),
+                ):
+                    total = complete_total(currency_rows.to_dict("records"), field)
+                    column.metric(
+                        f"{label} · {currency}",
+                        f"{symbol}{total:,.2f}" if total is not None else "Unavailable",
+                    )
         else:
-            st.info("No completed buy/sell cycles in this period yet. Open positions will appear after exit fills close a cycle.")
-        with st.expander("Captured Groww fills"):
-            visible = period_fills[["trade_at", "segment", "symbol", "side", "quantity", "price", "fees", "order_id"]].copy()
-            st.dataframe(visible, use_container_width=True, hide_index=True)
+            st.info("No positions are selected. Tick positions in Trade journal to include them.")

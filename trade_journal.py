@@ -183,6 +183,44 @@ def save_reviews(db_path: str | Path, reviews: pd.DataFrame) -> None:
                 (str(row["Cycle ID"]), adherence, note, reviewed))
 
 
+def load_portfolio_inclusions(db_path: str | Path) -> dict[str, bool]:
+    """Load the saved portfolio-inclusion choice for each current position."""
+    path = Path(db_path)
+    if not path.exists():
+        return {}
+    with sqlite3.connect(path) as connection:
+        table_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'portfolio_inclusions'"
+        ).fetchone()
+        if table_exists is None:
+            return {}
+        rows = connection.execute(
+            "SELECT position_key, included FROM portfolio_inclusions"
+        ).fetchall()
+    return {str(key): bool(included) for key, included in rows}
+
+
+def save_portfolio_inclusions(
+    db_path: str | Path,
+    inclusions: dict[str, bool],
+) -> None:
+    """Persist portfolio inclusion choices for current stock positions."""
+    path = Path(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS portfolio_inclusions ("
+            "position_key TEXT PRIMARY KEY, included INTEGER NOT NULL)"
+        )
+        connection.executemany(
+            "INSERT INTO portfolio_inclusions (position_key, included) "
+            "VALUES (?, ?) ON CONFLICT(position_key) "
+            "DO UPDATE SET included = excluded.included",
+            [(key, int(included)) for key, included in inclusions.items()],
+        )
+
+
 def merge_reviews(db_path: str | Path, cycles: pd.DataFrame) -> pd.DataFrame:
     if cycles.empty:
         return cycles

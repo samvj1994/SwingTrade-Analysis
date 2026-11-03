@@ -47,29 +47,21 @@ Set either `GROWW_ACCESS_TOKEN`, or both `GROWW_API_KEY` and
 expire according to the date shown in Groww; replace an expired token and
 restart Streamlit. Never put real credentials in Python files or commit `.env`.
 
-The Groww portfolio tab separates delivery-stock holdings, cash positions, and
-F&O positions. Stock cost basis is derived from Groww's quantity and average
-price; when a live quote is unavailable, the latest downloaded daily close is
-used as a clearly dated historical fallback. The installed Groww Trade API
-does not provide mutual-fund holdings or a complete transaction/cash-flow
-ledger. The dashboard marks those API-only totals unavailable instead of
-estimating them. A normalized CSV template in the Groww portfolio tab can be
-used to calculate statement-based section and combined XIRR/P&L. Include
-complete signed investment cash flows and closing values, with the same
-valuation date for every section included in combined results. The CSV columns
-are `date`, `asset_class`, `cash_flow`, and `market_value`; purchases are
-negative and sale/redemption proceeds are positive.
+## Current positions and portfolio
 
-## Trading journal
+Open **Trade journal** and choose **Fetch current positions from Groww**. The
+journal shows only current positive-quantity NSE/BSE stock holdings and US
+stock holdings when Groww returns them with an identifiable US exchange or USD
+currency. It does not fetch orders, F&O positions, completed trades, or
+transaction history. Current Indian stock prices use Groww quotes when
+available, then the latest downloaded daily close; US prices are shown only
+when included in Groww's holding data.
 
-Open **Trading journal** and choose **Sync executed trades from Groww** after
-placing trades. Captured fills are stored locally in `data/trade_journal.sqlite3`
-and deduplicated on later syncs. The journal reports closed-cycle gross/net P&L,
-win rate, profit factor, expectancy, drawdown, average hold, plan adherence,
-review completion, and cumulative XIRR since the first captured fill. Review
-fields can be edited in the closed-cycle table and saved. XIRR uses the cash
-flows in the captured fills and marks open positions when a current Groww price
-is available; it cannot include trades from before they were first synced.
+Use the **Include in portfolio** checkbox to select positions for the
+**Portfolio** tab. Choices are saved locally in
+`data/trade_journal.sqlite3` and retained when positions are fetched again.
+Portfolio values are grouped by currency so INR and USD amounts are not added
+together. The dashboard does not place orders.
 
 ## Strategy implemented
 
@@ -79,8 +71,7 @@ fallen below the EMA 220 at least once in the preceding 90 sessions. An entry
 signal additionally requires a close above the previous 252-session closing
 high. Buy orders execute at the next session open.
 
-The dashboard applies the same signal rules to NIFTY 50, SENSEX, and Nasdaq-100 constituents. It no longer
-simulates a portfolio; actual Groww fills are tracked in the trading journal.
+The dashboard applies the same signal rules to NIFTY 50, SENSEX, and Nasdaq-100 constituents. It does not place or simulate orders.
 
 ## Push to GitHub
 

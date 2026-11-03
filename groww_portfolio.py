@@ -34,6 +34,14 @@ def as_number(value: object) -> float | None:
     return result if math.isfinite(result) else None
 
 
+def _first_number(record: Mapping[str, object], fields: tuple[str, ...]) -> float | None:
+    for field in fields:
+        number = as_number(record.get(field))
+        if number is not None:
+            return number
+    return None
+
+
 def extract_ltp_prices(response: object, symbols: set[str]) -> dict[str, float]:
     """Extract quote values from Groww's symbol-keyed or nested LTP response."""
     prices: dict[str, float] = {}
@@ -61,7 +69,12 @@ def extract_ltp_prices(response: object, symbols: set[str]) -> dict[str, float]:
 
 def stock_quote_symbol(holding: dict[str, object]) -> str | None:
     """Choose one supported exchange symbol for a stock holding."""
-    symbol = str(holding.get("trading_symbol", ""))
+    symbol = str(
+        holding.get("trading_symbol")
+        or holding.get("symbol")
+        or holding.get("ticker")
+        or ""
+    )
     exchanges = holding.get("tradable_exchanges")
     exchange = next(
         (
@@ -71,14 +84,32 @@ def stock_quote_symbol(holding: dict[str, object]) -> str | None:
         ),
         None,
     )
+    if exchange is None:
+        exchange = next(
+            (
+                candidate
+                for candidate in ("NSE", "BSE")
+                if str(
+                    holding.get("exchange")
+                    or holding.get("exchange_name")
+                    or holding.get("listing_exchange")
+                    or holding.get("market")
+                    or ""
+                ).strip().upper()
+                == candidate
+            ),
+            None,
+        )
     return f"{exchange}_{symbol}" if exchange and symbol else None
 
 
 def stock_quote_symbols(holdings: list[dict[str, object]]) -> set[str]:
-    """Return one quote symbol per holding to stay within Groww's batch limit."""
+    """Return one quote symbol per open stock holding."""
     return {
         quote_symbol
         for holding in holdings
+        if (quantity := as_number(holding.get("quantity"))) is not None
+        and quantity > 0
         if (quote_symbol := stock_quote_symbol(holding)) is not None
     }
 
@@ -146,6 +177,133 @@ def stock_holding_rows(
             "Current value": current_value,
             "Unrealized P&L": current_value - invested if current_value is not None and invested is not None else None,
         })
+    return rows
+
+
+def current_stock_position_rows(
+    holdings: list[dict[str, object]],
+    ltp_prices: dict[str, float],
+    historical_prices: dict[str, tuple[float, pd.Timestamp]] | None = None,
+) -> list[dict[str, object]]:
+    """Build current NSE/BSE and explicitly identified US stock positions."""
+    historical_prices = historical_prices or {}
+    rows = []
+    for holding in holdings:
+        quantity = as_number(holding.get("quantity"))
+        if quantity is None or quantity <= 0:
+            continue
+
+        symbol = str(
+            holding.get("trading_symbol")
+            or holding.get("symbol")
+            or holding.get("ticker")
+            or ""
+        ).strip().upper()
+        market_fields = (
+            "exchange",
+            "exchange_name",
+            "listing_exchange",
+            "market",
+            "market_name",
+            "country",
+            "currency",
+            "currency_code",
+            "trading_currency",
+        )
+        market_values = [
+            str(holding.get(field, "")).upper()
+            for field in market_fields
+            if holding.get(field) is not None
+        ]
+        tradable_exchanges = holding.get("tradable_exchanges")
+        if isinstance(tradable_exchanges, list):
+            market_values.extend(str(value).upper() for value in tradable_exchanges)
+        market_text = " ".join(market_values)
+        quote_symbol = stock_quote_symbol(holding)
+        if quote_symbol:
+            exchange, quote_ticker = quote_symbol.split("_", 1)
+            market, currency = exchange, "INR"
+            symbol = quote_ticker
+        else:
+            domestic_exchange = next(
+                (
+                    exchange
+                    for exchange in ("NSE", "BSE")
+                    if exchange in {value.strip() for value in market_values}
+                ),
+                None,
+            )
+            is_us_listing = any(
+                value.strip() in {"US", "USA", "UNITED STATES", "UNITED STATES OF AMERICA", "USD"}
+                or "NASDAQ" in value
+                or "NYSE" in value
+                for value in market_values
+            )
+            if domestic_exchange:
+                market, currency = domestic_exchange, "INR"
+                quote_symbol = f"{market}_{symbol}"
+            elif is_us_listing:
+                market = next(
+                    (name for name in ("NASDAQ", "NYSE") if name in market_text),
+                    "US",
+                )
+                currency = "USD"
+            else:
+                continue
+        if not symbol:
+            continue
+
+        average_price = _first_number(
+            holding, ("average_price", "avg_price", "average_cost", "cost_price")
+        )
+        invested_value = (
+            quantity * average_price if average_price is not None else None
+        )
+        if invested_value is None and market == "INR":
+            invested_value = _first_number(
+                holding, ("invested_value", "cost_basis", "total_investment")
+            )
+        price = ltp_prices.get(quote_symbol) if quote_symbol else None
+        price_source = "Live Groww quote" if price is not None else None
+        price_date = None
+        if quote_symbol and price is None and quote_symbol in historical_prices:
+            price, price_date = historical_prices[quote_symbol]
+            price_source = "Historical close"
+        if price is None:
+            for field in ("ltp", "last_price", "market_price", "current_price"):
+                price = as_number(holding.get(field))
+                if price is not None and price > 0:
+                    price_source = "Groww holding data"
+                    break
+                price = None
+        market_value = quantity * price if price is not None else _first_number(
+            holding, ("current_value", "market_value", "holding_value")
+        )
+        if price is None and market_value is not None:
+            price = market_value / quantity
+        unrealized_pnl = (
+            market_value - invested_value
+            if market_value is not None and invested_value is not None
+            else _first_number(
+                holding, ("unrealized_pnl", "unrealised_pnl")
+            )
+        )
+        rows.append(
+            {
+                "Position key": f"{market}:{symbol}",
+                "Market": market,
+                "Symbol": symbol,
+                "Currency": currency,
+                "Quantity": quantity,
+                "Average cost": average_price,
+                "Invested value": invested_value,
+                "Current price": price,
+                "Market value": market_value,
+                "Unrealized P&L": unrealized_pnl,
+                "Price source": price_source or "Unavailable",
+                "Price date": price_date,
+            }
+        )
     return rows
 
 
