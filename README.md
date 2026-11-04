@@ -28,6 +28,11 @@ downloaded files are local and excluded from Git, so download them on each
 computer. The signal scan needs sufficient warm-up history for its 52-week
 range and 220-session EMA.
 
+For SENSEX constituents, the downloader uses BSE price history where Yahoo
+Finance provides at least 309 daily bars. If BSE history is shorter, it uses
+the same stock's NSE history when available and labels the row **NSE fallback**
+in the dashboard; prices can differ slightly between exchanges.
+
 The Nasdaq-100 ticker universe is in `nasdaq100_symbols.csv`. It follows
 Nasdaq's published constituent list and is adjusted for Nasdaq's announced
 2026 additions and replacements. Constituent membership can change separately

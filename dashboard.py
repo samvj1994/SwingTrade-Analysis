@@ -175,6 +175,7 @@ for symbol, data in market_data.items():
         "Readiness": "Ready to trade" if bool(latest["Entry_Signal"]) else ("Watch closely" if int(latest["Criteria_Met"]) >= 4 else "Needs more confirmation"),
         "Signal date": indian_date(latest["Date"]),
         "Close": latest["Close"],
+        "Price source": latest.get("Price source", "Yahoo Finance"),
         "Reference entry": latest["Close"],
         "Stop reference": latest["Close"] * (1 - stop_loss_pct),
         "Currency": "USD" if exchange == "NASDAQ" else "INR",
@@ -222,6 +223,13 @@ with tab_screen:
         incomplete = ranked[ranked["Data bars"] < 309]
         if not incomplete.empty:
             st.warning(f"{len(incomplete)} stock(s) have fewer than 309 trading bars and cannot fully evaluate the 220-session EMA and 90-session pullback conditions yet.")
+        nse_fallbacks = ranked[ranked["Price source"] == "NSE fallback"]
+        if not nse_fallbacks.empty:
+            st.warning(
+                f"{len(nse_fallbacks)} SENSEX constituent(s) use NSE price history "
+                "because Yahoo Finance returned fewer than 309 BSE bars. The price "
+                "source is listed in the setup table."
+            )
 
         st.subheader("Active entry signals")
         if qualified.empty:
@@ -426,7 +434,7 @@ with tab_screen:
 
         st.subheader("Top setups to review")
         top_setups = ranked.head(10)[
-            ["Exchange", "Index", "Symbol", "Signal date", "Close", "Currency", "Criteria met", "Readiness", "Missing criteria"]
+            ["Exchange", "Index", "Symbol", "Signal date", "Close", "Currency", "Price source", "Criteria met", "Readiness", "Missing criteria"]
         ].rename(
             columns={
                 "Criteria met": "Checks passed",

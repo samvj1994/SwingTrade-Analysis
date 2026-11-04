@@ -20,6 +20,7 @@ import yfinance as yf
 
 
 DEFAULT_START_DATE = "2025-01-01"
+MINIMUM_STRATEGY_BARS = 309
 BASE_DIR = Path(__file__).resolve().parent
 SYMBOLS_FILE = BASE_DIR / "nifty50_symbols.csv"
 DATA_DIR = BASE_DIR / "data"
@@ -91,6 +92,33 @@ def download_symbol(symbol: str, start_date: str, end_date: str | None, suffix: 
     return data.loc[:, [column for column in preferred_columns if column in data.columns]]
 
 
+def resolve_yahoo_ticker(symbol: str, yahoo_ticker: str, suffix: str) -> str:
+    """Use a name-based Yahoo ticker for BSE symbols mapped to numeric scrip codes."""
+    if suffix == ".BO" and yahoo_ticker.isdigit():
+        return symbol
+    return yahoo_ticker
+
+
+def download_market_symbol(
+    symbol: str,
+    yahoo_ticker: str,
+    start_date: str,
+    end_date: str | None,
+    suffix: str,
+) -> tuple[pd.DataFrame, str]:
+    """Prefer BSE history, using strategy-ready NSE history when BSE is too short."""
+    resolved_ticker = resolve_yahoo_ticker(symbol, yahoo_ticker, suffix)
+    data = download_symbol(resolved_ticker, start_date, end_date, suffix)
+    if suffix != ".BO":
+        return data, "Yahoo Finance"
+
+    if len(data) < MINIMUM_STRATEGY_BARS:
+        nse_data = download_symbol(symbol, start_date, end_date, ".NS")
+        if len(nse_data) >= MINIMUM_STRATEGY_BARS:
+            return nse_data, "NSE fallback"
+    return data, "BSE"
+
+
 def main(start_date: str, end_date: str | None, symbols_file: Path, output_dir: Path, suffix: str) -> int:
     YFINANCE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     yf.set_tz_cache_location(str(YFINANCE_CACHE_DIR))
@@ -101,10 +129,19 @@ def main(start_date: str, end_date: str | None, symbols_file: Path, output_dir: 
     failures: list[str] = []
     for symbol, yahoo_ticker in symbols:
         try:
-            data = download_symbol(yahoo_ticker, start_date, end_date, suffix)
+            data, price_source = download_market_symbol(
+                symbol, yahoo_ticker, start_date, end_date, suffix
+            )
+            if suffix == ".BO":
+                data["Price source"] = price_source
             output_path = output_dir / f"{symbol.replace('.NS', '').replace('.BO', '')}.csv"
             data.to_csv(output_path, index=False)
-            logging.info("Saved %s (%d daily bars)", output_path.name, len(data))
+            logging.info(
+                "Saved %s (%d daily bars; %s)",
+                output_path.name,
+                len(data),
+                price_source,
+            )
         except Exception as error:  # Keep downloading the remaining symbols.
             failures.append(symbol)
             logging.error("Failed to download %s: %s", symbol, error)
