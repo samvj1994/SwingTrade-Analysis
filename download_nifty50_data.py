@@ -1,12 +1,12 @@
-"""Download daily Indian equity data from Yahoo Finance.
+"""Download daily equity data from Groww or Yahoo Finance.
 
 Place ``nifty50_symbols.csv`` beside this script, then run:
 
     pip install -r requirements.txt
     python download_nifty50_data.py
 
-Each symbol is saved under the selected output directory. Yahoo Finance uses
-the ``.NS`` suffix for NSE stocks and ``.BO`` for BSE stocks.
+Each symbol is saved under the selected output directory. Groww supports NSE
+and BSE history; Yahoo Finance is used for markets not supported by Groww.
 """
 
 from __future__ import annotations
@@ -14,19 +14,54 @@ from __future__ import annotations
 import argparse
 import logging
 from pathlib import Path
+import time
+from typing import Protocol
 
 import pandas as pd
 import yfinance as yf
 
+from groww_connection import get_groww_client
+
 
 DEFAULT_START_DATE = "2025-01-01"
 MINIMUM_STRATEGY_BARS = 309
+GROWW_MAX_CANDLE_DAYS = 180
+GROWW_MIN_REQUEST_INTERVAL_SECONDS = 0.25
+GROWW_RATE_LIMIT_RETRIES = 4
+GROWW_HISTORICAL_SYMBOL_ALIASES = {"ETERNAL": ("ZOMATO",)}
 BASE_DIR = Path(__file__).resolve().parent
 SYMBOLS_FILE = BASE_DIR / "nifty50_symbols.csv"
 DATA_DIR = BASE_DIR / "data"
 # Keep yfinance's timezone/cookie SQLite cache in the project. This avoids
 # permission problems on machines where the default user cache is unavailable.
 YFINANCE_CACHE_DIR = BASE_DIR / "work" / "yfinance_cache"
+
+
+class GrowwHistoricalClient(Protocol):
+    def get_historical_candles(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        groww_symbol: str,
+        start_time: str,
+        end_time: str,
+        candle_interval: str,
+        timeout: int,
+    ) -> dict[str, object]: ...
+
+
+class GrowwRequestPacer:
+    """Keep historical calls below Groww's published per-minute rate limit."""
+
+    def __init__(self) -> None:
+        self._last_request_at = 0.0
+
+    def wait(self) -> None:
+        elapsed = time.monotonic() - self._last_request_at
+        if self._last_request_at and elapsed < GROWW_MIN_REQUEST_INTERVAL_SECONDS:
+            time.sleep(GROWW_MIN_REQUEST_INTERVAL_SECONDS - elapsed)
+        self._last_request_at = time.monotonic()
 
 
 def read_symbols(path: Path) -> list[tuple[str, str]]:
@@ -68,7 +103,7 @@ def download_symbol(symbol: str, start_date: str, end_date: str | None, suffix: 
     yahoo_symbol = symbol if symbol.endswith(suffix) else f"{symbol}{suffix}"
     # yfinance's end date is exclusive; use tomorrow when no end date is supplied.
     effective_end = end_date or (
-        pd.Timestamp.today().normalize() + pd.Timedelta(days=1)
+        pd.Timestamp.today().normalize() + pd.Timedelta("1d")
     ).strftime("%Y-%m-%d")
     data = yf.download(
         yahoo_symbol,
@@ -105,8 +140,41 @@ def download_market_symbol(
     start_date: str,
     end_date: str | None,
     suffix: str,
+    provider: str = "yahoo",
+    groww_client: GrowwHistoricalClient | None = None,
+    request_pacer: GrowwRequestPacer | None = None,
 ) -> tuple[pd.DataFrame, str]:
-    """Prefer BSE history, using strategy-ready NSE history when BSE is too short."""
+    """Download a symbol from Groww or Yahoo, with an NSE fallback for Yahoo BSE data."""
+    if provider == "groww":
+        if suffix not in (".NS", ".BO"):
+            raise ValueError("Groww historical data supports NSE/BSE symbols, not US stocks.")
+        if groww_client is None:
+            raise ValueError("A Groww client is required for Groww historical data.")
+        exchange = "NSE" if suffix == ".NS" else "BSE"
+        data = download_groww_symbol(
+            groww_client, symbol, exchange, start_date, end_date, request_pacer
+        )
+        price_source = f"Groww API ({exchange})"
+        aliases = GROWW_HISTORICAL_SYMBOL_ALIASES.get(symbol, ())
+        if aliases:
+            historical_data = [
+                download_groww_symbol(
+                    groww_client, alias, exchange, start_date, end_date, request_pacer
+                )
+                for alias in aliases
+            ]
+            data = pd.concat([*historical_data, data], ignore_index=True)
+            data = data.drop_duplicates(subset=["Date"], keep="last").sort_values("Date")
+            price_source = f"{price_source}; {'/'.join(aliases)} history merged"
+        if exchange == "BSE" and len(data) < MINIMUM_STRATEGY_BARS:
+            nse_data = download_groww_symbol(
+                groww_client, symbol, "NSE", start_date, end_date, request_pacer
+            )
+            if len(nse_data) >= MINIMUM_STRATEGY_BARS:
+                data = nse_data
+                price_source = "Groww API (NSE fallback for BSE)"
+        return data.reset_index(drop=True), price_source
+
     resolved_ticker = resolve_yahoo_ticker(symbol, yahoo_ticker, suffix)
     data = download_symbol(resolved_ticker, start_date, end_date, suffix)
     if suffix != ".BO":
@@ -119,9 +187,122 @@ def download_market_symbol(
     return data, "BSE"
 
 
-def main(start_date: str, end_date: str | None, symbols_file: Path, output_dir: Path, suffix: str) -> int:
-    YFINANCE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    yf.set_tz_cache_location(str(YFINANCE_CACHE_DIR))
+def download_groww_symbol(
+    groww_client: GrowwHistoricalClient,
+    symbol: str,
+    exchange: str,
+    start_date: str,
+    end_date: str | None,
+    request_pacer: GrowwRequestPacer | None = None,
+) -> pd.DataFrame:
+    """Fetch daily Groww candles in chunks no longer than 180 calendar days."""
+    start = pd.Timestamp(start_date).normalize()
+    end = pd.Timestamp(
+        end_date or (pd.Timestamp.today().normalize() + pd.Timedelta("1d"))
+    ).normalize()
+    if end <= start:
+        raise ValueError("The end date must be after the start date.")
+
+    request_pacer = request_pacer or GrowwRequestPacer()
+    frames = []
+    chunk_start = start
+    while chunk_start < end:
+        chunk_end = min(
+            chunk_start + pd.Timedelta(f"{GROWW_MAX_CANDLE_DAYS}d"), end
+        )
+        request_start = chunk_start.strftime("%Y-%m-%d 00:00:00")
+        request_end = (chunk_end - pd.Timedelta("1s")).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        response = get_groww_candles(
+            groww_client,
+            exchange,
+            symbol,
+            request_start,
+            request_end,
+            request_pacer,
+        )
+        candles = response.get("candles", []) if isinstance(response, dict) else []
+        if candles:
+            valid_candles = [
+                candle[:6]
+                for candle in candles
+                if len(candle) >= 6 and all(pd.notna(value) for value in candle[:5])
+            ]
+            if valid_candles:
+                frames.append(
+                    pd.DataFrame(
+                        valid_candles,
+                        columns=["Date", "Open", "High", "Low", "Close", "Volume"],
+                    )
+                )
+        chunk_start = chunk_end
+
+    if not frames:
+        raise ValueError(f"Groww returned no daily candles for {exchange}-{symbol}.")
+    data = pd.concat(frames, ignore_index=True)
+    data["Date"] = pd.to_datetime(data["Date"], errors="coerce").dt.strftime(
+        "%Y-%m-%d"
+    )
+    for column in ("Open", "High", "Low", "Close", "Volume"):
+        if column in data:
+            data[column] = pd.to_numeric(data[column], errors="coerce")
+    data = data.dropna(subset=["Date", "Open", "High", "Low", "Close"])
+    data = data.drop_duplicates(subset=["Date"], keep="last").sort_values("Date")
+    return data[["Date", "Open", "High", "Low", "Close", "Volume"]].reset_index(
+        drop=True
+    )
+
+
+def get_groww_candles(
+    groww_client: GrowwHistoricalClient,
+    exchange: str,
+    symbol: str,
+    start_time: str,
+    end_time: str,
+    request_pacer: GrowwRequestPacer,
+) -> dict[str, object]:
+    for attempt in range(GROWW_RATE_LIMIT_RETRIES + 1):
+        request_pacer.wait()
+        try:
+            return groww_client.get_historical_candles(
+                exchange=exchange,
+                segment="CASH",
+                groww_symbol=f"{exchange}-{symbol}",
+                start_time=start_time,
+                end_time=end_time,
+                candle_interval="1day",
+                timeout=30,
+            )
+        except Exception as error:
+            if "rate limit" not in str(error).lower() or attempt == GROWW_RATE_LIMIT_RETRIES:
+                raise
+            delay = 2**attempt
+            logging.warning(
+                "Groww rate limit for %s-%s; retrying in %d seconds",
+                exchange,
+                symbol,
+                delay,
+            )
+            time.sleep(delay)
+    raise RuntimeError(f"Unable to fetch Groww candles for {exchange}-{symbol}.")
+
+
+def main(
+    start_date: str,
+    end_date: str | None,
+    symbols_file: Path,
+    output_dir: Path,
+    suffix: str,
+    provider: str = "yahoo",
+) -> int:
+    if provider == "yahoo":
+        YFINANCE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        yf.set_tz_cache_location(str(YFINANCE_CACHE_DIR))
+        groww_client = None
+    else:
+        groww_client = get_groww_client()
+    request_pacer = GrowwRequestPacer() if provider == "groww" else None
     symbols = read_symbols(symbols_file)
     output_dir.mkdir(parents=True, exist_ok=True)
     logging.info("Downloading %d symbols from %s", len(symbols), start_date)
@@ -130,9 +311,16 @@ def main(start_date: str, end_date: str | None, symbols_file: Path, output_dir: 
     for symbol, yahoo_ticker in symbols:
         try:
             data, price_source = download_market_symbol(
-                symbol, yahoo_ticker, start_date, end_date, suffix
+                symbol,
+                yahoo_ticker,
+                start_date,
+                end_date,
+                suffix,
+                provider=provider,
+                groww_client=groww_client,
+                request_pacer=request_pacer,
             )
-            if suffix == ".BO":
+            if provider == "groww" or suffix == ".BO":
                 data["Price source"] = price_source
             output_path = output_dir / f"{symbol.replace('.NS', '').replace('.BO', '')}.csv"
             data.to_csv(output_path, index=False)
@@ -161,5 +349,20 @@ if __name__ == "__main__":
     parser.add_argument("--symbols-file", type=Path, default=SYMBOLS_FILE)
     parser.add_argument("--output-dir", type=Path, default=DATA_DIR)
     parser.add_argument("--suffix", choices=[".NS", ".BO", ""], default=".NS")
+    parser.add_argument(
+        "--provider",
+        choices=["groww", "yahoo"],
+        default="yahoo",
+        help="Market-data source. Groww supports NSE/BSE; Yahoo is used for Nasdaq-100.",
+    )
     args = parser.parse_args()
-    raise SystemExit(main(args.start, args.end, args.symbols_file, args.output_dir, args.suffix))
+    raise SystemExit(
+        main(
+            args.start,
+            args.end,
+            args.symbols_file,
+            args.output_dir,
+            args.suffix,
+            args.provider,
+        )
+    )

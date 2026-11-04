@@ -86,9 +86,10 @@ st.caption("Daily swing setups across NSE, BSE, and Nasdaq-100 · Rule-based sig
 with st.sidebar:
     st.header("Market universe")
     selected_exchange = st.selectbox("Scan market", ["All", "NSE", "BSE", "NASDAQ"])
-    st.caption("India-market prices are in INR; Nasdaq prices are in USD.")
+    st.caption("NSE/BSE refreshes use Groww; Nasdaq-100 uses Yahoo Finance because Groww does not support US exchanges.")
     st.divider()
     st.header("Market data")
+    st.caption("Groww API access is required to refresh NSE/BSE history. Daily history is downloaded in 180-day chunks.")
     fetch_start = st.date_input("Data start date", value=date(2024, 1, 1), format="DD-MM-YYYY", help="Use at least one year of warm-up data before the backtest start date for the 220-day EMA and 52-week conditions.")
     fetch_end = st.date_input("Data end date (inclusive)", value=date.today(), format="DD-MM-YYYY")
     if st.button("Refresh all NIFTY 50 data", type="primary", use_container_width=True):
@@ -98,7 +99,11 @@ with st.sidebar:
             with st.spinner("Downloading daily OHLCV data for all symbols..."):
                 # Downloader accepts an exclusive end date.
                 end_exclusive = pd.Timestamp(fetch_end) + pd.Timedelta(days=1)
-                result = subprocess.run([sys.executable, str(BASE_DIR / "download_nifty50_data.py"), "--start", str(fetch_start), "--end", end_exclusive.strftime("%Y-%m-%d")], capture_output=True, text=True)
+                result = subprocess.run([
+                    sys.executable, str(BASE_DIR / "download_nifty50_data.py"),
+                    "--start", str(fetch_start), "--end", end_exclusive.strftime("%Y-%m-%d"),
+                    "--suffix", ".NS", "--provider", "groww",
+                ], capture_output=True, text=True)
             if result.returncode:
                 st.error(result.stderr or result.stdout)
             else:
@@ -115,6 +120,7 @@ with st.sidebar:
                     "--start", str(fetch_start), "--end", end_exclusive.strftime("%Y-%m-%d"),
                     "--symbols-file", str(BASE_DIR / "sensex_symbols.csv"),
                     "--output-dir", str(SENSEX_DIR), "--suffix", ".BO",
+                    "--provider", "groww",
                 ], capture_output=True, text=True)
             if result.returncode:
                 st.error(result.stderr or result.stdout)
@@ -131,7 +137,7 @@ with st.sidebar:
                     sys.executable, str(BASE_DIR / "download_nifty50_data.py"),
                     "--start", str(fetch_start), "--end", end_exclusive.strftime("%Y-%m-%d"),
                     "--symbols-file", str(BASE_DIR / "nasdaq100_symbols.csv"),
-                    "--output-dir", str(NASDAQ_DIR), "--suffix", "",
+                    "--output-dir", str(NASDAQ_DIR), "--suffix", "", "--provider", "yahoo",
                 ], capture_output=True, text=True)
             if result.returncode:
                 st.error(result.stderr or result.stdout or "Some Nasdaq-100 symbols failed to refresh.")
@@ -223,12 +229,14 @@ with tab_screen:
         incomplete = ranked[ranked["Data bars"] < 309]
         if not incomplete.empty:
             st.warning(f"{len(incomplete)} stock(s) have fewer than 309 trading bars and cannot fully evaluate the 220-session EMA and 90-session pullback conditions yet.")
-        nse_fallbacks = ranked[ranked["Price source"] == "NSE fallback"]
+        nse_fallbacks = ranked[
+            ranked["Price source"].str.contains("NSE fallback", regex=False, na=False)
+        ]
         if not nse_fallbacks.empty:
             st.warning(
-                f"{len(nse_fallbacks)} SENSEX constituent(s) use NSE price history "
-                "because Yahoo Finance returned fewer than 309 BSE bars. The price "
-                "source is listed in the setup table."
+                f"{len(nse_fallbacks)} SENSEX constituent(s) use NSE fallback history "
+                "because BSE history had fewer than 309 daily bars. Check the Price "
+                "source column for details."
             )
 
         st.subheader("Active entry signals")

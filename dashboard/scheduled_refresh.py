@@ -25,17 +25,18 @@ def main() -> int:
     status_path.write_text(json.dumps({"date": now.date().isoformat(), "state": "running"}))
     end = (now.date() + timedelta(days=1)).isoformat()
     jobs = [
-        ("NIFTY 50", ROOT / "nifty50_symbols.csv", DATA, ".NS"),
-        ("SENSEX", ROOT / "sensex_symbols.csv", DATA / "BSE", ".BO"),
-        ("Nasdaq-100", ROOT / "nasdaq100_symbols.csv", DATA / "NASDAQ", ""),
+        ("NIFTY 50", ROOT / "nifty50_symbols.csv", DATA, ".NS", "groww"),
+        ("SENSEX", ROOT / "sensex_symbols.csv", DATA / "BSE", ".BO", "groww"),
+        ("Nasdaq-100", ROOT / "nasdaq100_symbols.csv", DATA / "NASDAQ", "", "yahoo"),
     ]
     failures = []
-    for label, symbols, output, suffix in jobs:
+    for label, symbols, output, suffix, provider in jobs:
         print(f"Refreshing {label}…", flush=True)
         result = subprocess.run([
             sys.executable, str(ROOT / "download_nifty50_data.py"),
             "--start", "2024-01-01", "--end", end,
             "--symbols-file", str(symbols), "--output-dir", str(output), "--suffix", suffix,
+            "--provider", provider,
         ], cwd=ROOT, check=False)
         if result.returncode:
             failures.append(label)

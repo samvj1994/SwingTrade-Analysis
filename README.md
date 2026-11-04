@@ -28,10 +28,10 @@ downloaded files are local and excluded from Git, so download them on each
 computer. The signal scan needs sufficient warm-up history for its 52-week
 range and 220-session EMA.
 
-For SENSEX constituents, the downloader uses BSE price history where Yahoo
-Finance provides at least 309 daily bars. If BSE history is shorter, it uses
-the same stock's NSE history when available and labels the row **NSE fallback**
-in the dashboard; prices can differ slightly between exchanges.
+NIFTY 50 and SENSEX refreshes use Groww's daily historical-candle API, fetched
+in chunks that respect Groww's 180-day per-request limit. Nasdaq-100 history
+continues to use Yahoo Finance because Groww's Trading API does not cover US
+exchanges. The dashboard identifies the data source for each symbol.
 
 The Nasdaq-100 ticker universe is in `nasdaq100_symbols.csv`. It follows
 Nasdaq's published constituent list and is adjusted for Nasdaq's announced
@@ -40,8 +40,10 @@ from the daily price refresh, so update this file after future index changes.
 
 ## Groww API credentials
 
-Groww is optional; market screening works without it. To enable the Groww
-portfolio and trading-journal tabs, copy the example file and edit it locally:
+Groww API access is required to refresh NSE/BSE market history and fetch current
+stock holdings. Market screening can still use previously downloaded CSVs
+without Groww credentials. Nasdaq-100 refreshes use Yahoo Finance. To configure
+Groww access, copy the example file and edit it locally:
 
 ```bash
 cp .env.example .env
