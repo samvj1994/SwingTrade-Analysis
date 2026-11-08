@@ -1,0 +1,28 @@
+{
+  "folders": [
+    {
+      "path": "/Users/sameerjoshi/Projects/India Index OI Dashboard"
+    }
+  ],
+  "settings": {
+    "python.defaultInterpreterPath": "/Users/sameerjoshi/Projects/India Index OI Dashboard/.venv/bin/python",
+    "python.terminal.activateEnvironment": true,
+    "files.exclude": {
+      "**/__pycache__": true,
+      "**/.pytest_cache": true,
+      "**/.dashboard_data": true
+    }
+  },
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "Run India Index OI Dashboard",
+        "type": "shell",
+        "command": "PORT=8000 /Users/sameerjoshi/Projects/India Index OI Dashboard/.venv/bin/python /Users/sameerjoshi/Projects/India Index OI Dashboard/run_dashboard.py",
+        "isBackground": true,
+        "problemMatcher": []
+      }
+    ]
+  }
+}
