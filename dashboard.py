@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import subprocess
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import date
 from pathlib import Path
 
@@ -31,6 +36,30 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 SENSEX_DIR = DATA_DIR / "BSE"
 NASDAQ_DIR = DATA_DIR / "NASDAQ"
+TELEGRAM_BOT_TOKEN = ""
+TELEGRAM_CHAT_ID = ""
+
+
+def load_dotenv() -> None:
+    """Load simple KEY=value settings from .env without overriding the shell."""
+    env_file = BASE_DIR / ".env"
+    if not env_file.is_file():
+        return
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if key and key.replace("_", "").isalnum():
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                value = value[1:-1]
+            os.environ.setdefault(key, value)
+
+
+load_dotenv()
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 
 def indian_date(value: object) -> str:
@@ -47,6 +76,68 @@ def response_records(response: object, key: str) -> list[dict[str, object]]:
     if not isinstance(records, list):
         return []
     return [record for record in records if isinstance(record, dict)]
+
+
+def telegram_signal_key(rows: list[dict[str, object]]) -> str:
+    """Create a stable key for the current set of daily entry signals."""
+    values = [
+        (row["Exchange"], row["Index"], row["Symbol"], row["Signal date"])
+        for row in rows
+    ]
+    return hashlib.sha256(json.dumps(sorted(values), separators=(",", ":")).encode()).hexdigest()
+
+
+def send_telegram_signal_alert(rows: list[dict[str, object]]) -> str | None:
+    """Send one Telegram summary for a newly observed signal set."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID or not rows:
+        return None
+    lines = ["🚨 NEW SWING ENTRY SIGNALS", ""]
+    for row in rows:
+        lines.extend([
+            f"{row['Exchange']} {row['Symbol']} · {row['Signal date']}",
+            f"Entry reference: {row['Reference entry']:,.2f} {row['Currency']} · Stop reference: {row['Stop reference']:,.2f}",
+            "",
+        ])
+    lines.append("Research alert only. Verify the live price and your risk plan before acting.")
+    request = urllib.request.Request(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        data=urllib.parse.urlencode({
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": "\n".join(lines),
+            "disable_web_page_preview": "true",
+        }).encode("utf-8"),
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        if not result.get("ok"):
+            return str(result.get("description") or "Telegram rejected the message.")
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as exc:
+        return f"Telegram notification failed: {exc}"
+    return None
+
+
+def notify_new_entry_signals(rows: list[dict[str, object]]) -> str | None:
+    """Notify once per signal-set key and retain the sent keys locally."""
+    if not rows or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return None
+    notification_path = DATA_DIR / "telegram_signal_notifications.json"
+    try:
+        sent = json.loads(notification_path.read_text(encoding="utf-8")) if notification_path.exists() else []
+    except (OSError, ValueError):
+        sent = []
+    if not isinstance(sent, list):
+        sent = []
+    key = telegram_signal_key(rows)
+    if key in sent:
+        return None
+    error = send_telegram_signal_alert(rows)
+    if error:
+        return error
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    notification_path.write_text(json.dumps((sent + [key])[-100:]), encoding="utf-8")
+    return None
 
 
 def fetch_current_stock_positions() -> dict[str, object]:
@@ -204,6 +295,12 @@ last_bar = max(data["Date"].max() for data in market_data.values())
 price_files = list(DATA_DIR.glob("*.csv")) + list(SENSEX_DIR.glob("*.csv")) + list(NASDAQ_DIR.glob("*.csv"))
 file_refresh = max(path.stat().st_mtime for path in price_files)
 st.caption(f"Last price bar: **{indian_date(last_bar)}** · Last refresh: **{pd.Timestamp(file_refresh, unit='s').strftime('%d-%m-%Y %H:%M:%S')}**")
+
+telegram_error = notify_new_entry_signals([
+    row for row in latest_rows if row["Status"] == "Qualified"
+])
+if telegram_error:
+    st.warning(telegram_error)
 
 tab_screen, tab_journal, tab_groww = st.tabs([
     ":material/radar: Market scan",
