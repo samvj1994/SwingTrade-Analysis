@@ -54,6 +54,20 @@ Set either `GROWW_ACCESS_TOKEN`, or both `GROWW_API_KEY` and
 expire according to the date shown in Groww; replace an expired token and
 restart Streamlit. Never put real credentials in Python files or commit `.env`.
 
+## Telegram signal alerts
+
+To send one Telegram group alert when a new daily entry signal is detected,
+add the bot token and group chat ID to `.env`:
+
+```env
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token
+TELEGRAM_CHAT_ID=-5588449934
+```
+
+The dashboard sends at most one alert for each observed set of qualified
+signals and stores sent-signal keys locally in `data/`. Alerts are research
+notifications only; the dashboard never places orders.
+
 ## Current positions and portfolio
 
 Open **Trade journal** and choose **Fetch current positions from Groww**. The

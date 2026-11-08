@@ -1,5 +1,7 @@
 pandas>=2.0
 yfinance>=0.2.50
 streamlit>=1.38
+altair>=5.0,<7
 growwapi>=1.0
 python-dotenv>=1.0
+watchdog>=4.0
