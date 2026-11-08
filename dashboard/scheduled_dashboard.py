@@ -1,32 +1,48 @@
-"""Serve the dashboard from 9:00 to 11:00 AM IST on weekdays only."""
+"""Keep the swing-trading dashboard running on its fixed local port."""
 
 from __future__ import annotations
 
 import subprocess
+import os
+import signal
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
-IST = ZoneInfo("Asia/Kolkata")
+PID_FILE = ROOT / "work" / "scheduled_dashboard.pid"
+
+
+def stop_dashboard() -> int:
+    """Stop the dashboard process started by this scheduler."""
+    try:
+        pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+    except (FileNotFoundError, OSError, ValueError):
+        print("No scheduled Swing dashboard process was found.")
+        return 0
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        print(f"Unable to stop scheduled Swing dashboard process {pid}.")
+        return 1
+    print("Scheduled Swing dashboard stopped.")
+    return 0
 
 
 def main() -> int:
-    now = datetime.now(IST)
-    if now.weekday() >= 5 or not (9 <= now.hour < 11):
-        print("Outside weekday dashboard window; not starting.")
-        return 0
+    if "--stop" in sys.argv[1:]:
+        return stop_dashboard()
+    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
     proc = subprocess.Popen([
         sys.executable, "-m", "streamlit", "run", str(ROOT / "dashboard.py"),
-        "--server.address", "127.0.0.1", "--server.port", "8501",
+        "--server.address", "127.0.0.1", "--server.port", "9000",
         "--server.headless", "true", "--browser.gatherUsageStats", "false",
     ], cwd=ROOT)
     try:
-        while datetime.now(IST).hour < 11:
-            if proc.poll() is not None:
-                return proc.returncode or 0
+        while proc.poll() is None:
             time.sleep(15)
     finally:
         if proc.poll() is None:
@@ -36,6 +52,10 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
+        try:
+            PID_FILE.unlink()
+        except FileNotFoundError:
+            pass
     return 0
 
 

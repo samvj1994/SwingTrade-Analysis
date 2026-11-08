@@ -14,8 +14,11 @@ python -m pip install -r requirements.txt
 streamlit run dashboard.py
 ```
 
-Open `http://localhost:8501` in your browser. Stop the dashboard with
+Open `http://localhost:9000` in your browser. Stop the dashboard with
 Control-C in Terminal.
+
+The macOS scheduled dashboard runs Monday–Friday from 09:00 to 11:00 IST.
+Market-history refresh is limited to that same 09:00–11:00 IST window.
 
 The dashboard uses a dark financial-workstation theme configured in
 `.streamlit/config.toml`.

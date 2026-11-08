@@ -1,0 +1,27 @@
+{
+  "folders": [
+    {
+      "path": "."
+    }
+  ],
+  "settings": {
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+    "python.terminal.activateEnvironment": true,
+    "files.exclude": {
+      "**/__pycache__": true,
+      "**/.pytest_cache": true
+    }
+  },
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "Run Swing Trading Dashboard",
+        "type": "shell",
+        "command": "${workspaceFolder}/.venv/bin/python -m streamlit run ${workspaceFolder}/dashboard.py --server.port 9000",
+        "isBackground": true,
+        "problemMatcher": []
+      }
+    ]
+  }
+}
